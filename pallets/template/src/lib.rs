@@ -1,47 +1,41 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-/// Edit this file to define custom logic or remove it if it is not needed.
-/// Learn more about FRAME and the core library of Substrate FRAME pallets:
-/// <https://docs.substrate.io/v3/runtime/frame>
 pub use pallet::*;
-
-#[cfg(test)]
-mod mock;
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
-	use frame_support::pallet_prelude::*;
-	use frame_system::pallet_prelude::*;
 
-	/// Configure the pallet by specifying the parameters and types on which it depends.
+	use frame_support::{
+		pallet_prelude::*,
+		transactional,
+		traits::{Currency, tokens::ExistenceRequirement},
+	};
+	use frame_system::pallet_prelude::*;
+	use scale_info::TypeInfo;
+
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
-		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		type Currency: Currency<Self::AccountId>;
 	}
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
 	pub struct Pallet<T>(_);
 
+	type BalanceOf<T> =
+    	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
+
 	#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo)]
-	pub struct Order {
+	#[scale_info(skip_type_params(T))]
+	#[codec(mel_bound())]
+	pub struct Order<T: Config> {
 		pub token_id: u64,
-		pub sell_price: u64,
+		pub sell_price: BalanceOf<T>,
 	}
 
-	// The pallet's runtime storage items.
-	// https://docs.substrate.io/v3/runtime/storage
 	#[pallet::storage]
 	#[pallet::getter(fn get_next_token_id)]
-	// Learn more about declaring storage items:
-	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
 	pub type NextTokenId<T> = StorageValue<_, u64>;
 
 	#[pallet::storage]
@@ -54,7 +48,7 @@ pub mod pallet {
 
 	#[pallet::storage]
 	#[pallet::getter(fn get_sell_order)]
-	pub type SellOrders<T> = StorageMap<_, Blake2_128Concat, u128, Order, OptionQuery>;
+	pub type SellOrders<T> = StorageMap<_, Blake2_128Concat, u128, Order<T>, OptionQuery>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn is_onsale)]
@@ -68,41 +62,40 @@ pub mod pallet {
 	#[pallet::getter(fn get_token_ids_of_owned_nfts)]
 	pub type OwnerToTokenIds<T: Config> = StorageDoubleMap<_, Blake2_128Concat, T::AccountId, Blake2_128Concat, u64, u64, OptionQuery>;
 
-	// Pallets use events to inform users when important changes are made.
-	// https://docs.substrate.io/v3/runtime/events-and-errors
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		/// Event documentation should end with an array that provides descriptive names for event
-		/// parameters. [tokenId, owner]
+		/// [TokenID, Minter] 
 		NFTMinted(u64, T::AccountId),
-		SellOrderCreated(u64, u64),
+		/// [TokenID, Price]
+		SellOrderCreated(u64, BalanceOf<T>),
+		/// [TokenID]
 		CancelledOrder(u64),
+		/// [Buyer, Seller, Price]
+		NFTSold(T::AccountId, T::AccountId, BalanceOf<T>),
 	}
 
-	// Errors inform users that something went wrong.
 	#[pallet::error]
 	pub enum Error<T> {
-		/// Error names should be descriptive.
-		NoneValue,
-		/// Errors should have helpful documentation associated with them.
 		StorageOverflow,
-		/// Token already minted
+		/// Given tokenID is already minted
 		TokenIdAlreadyMinted,
-		/// Nfts doesn't exist for given tokenid
-		InValidTokenId,
-		/// 
+		/// NFT doesn't exist for the given tokenID
+		InvalidTokenID,
+		/// You are not the owner of this token
 		NotTokenOwner,
+		/// Cannot add the same token twice
 		TokenAlreadyOnSale,
+		/// Given token is not available for purchase
 		TokenNotOnSale,
+		/// Invalid Sell order Id
 		SellOrderNotFound,
+		/// Empty marketplace
 		NoSellOrdersFound,
-
+		/// Insufficient fund to purchase NFT
+		NotEnoughBalance,
 	}
 
-	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
-	// These functions materialize as "extrinsics", which are often compared to transactions.
-	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		/// Mints an NFT
@@ -112,58 +105,38 @@ pub mod pallet {
 			let owner = ensure_signed(_origin)?;
 
 			// Gets token_id and updates NextTokenId
-			let token_id: u64 = match <NextTokenId<T>>::get() {
-				None => {
-					<NextTokenId<T>>::put(1);
-					0u64
-				},
-				Some(val) => {
-					let new_val = val.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					<NextTokenId<T>>::put(new_val);
-					val
-				},
-			};
+			let token_id = <NextTokenId<T>>::get().unwrap_or(0);
+			<NextTokenId<T>>::put(token_id.checked_add(1).ok_or(Error::<T>::StorageOverflow)?);
 
 			// Gets index of the current nfts for the owner
-			let number_of_nfts: u64 = match <OwnerToNumberOfNFTs<T>>::get(&owner) {
-				None => {
-					<OwnerToNumberOfNFTs<T>>::insert(&owner, 1);
-					0
-				},
-				Some(val) => {
-					let new_val = val.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					<OwnerToNumberOfNFTs<T>>::insert(&owner, new_val);
-					val
-				}
-			};
+			let number_of_nfts = <OwnerToNumberOfNFTs<T>>::get(&owner).unwrap_or(0);
+			<OwnerToNumberOfNFTs<T>>::insert(
+				&owner,
+				number_of_nfts + 1
+			);
 
-			// Ensures the tokenid is not already minted
-			ensure!(!TokenIdToOwner::<T>::contains_key(&token_id), Error::<T>::TokenIdAlreadyMinted);
-
-			// Adds record of tokenids owner
+			// Adds record of tokenIds owner
 			TokenIdToOwner::<T>::insert(&token_id, (&owner, &number_of_nfts));
 
 			// Adds tokenid to owners list of owned tokenids
 			OwnerToTokenIds::<T>::insert(&owner, &number_of_nfts, &token_id);
 
-			// Emit an event.
 			Self::deposit_event(Event::NFTMinted(token_id, owner));
-			// Return a successful DispatchResultWithPostInfo
 			Ok(())
 		}
 
 		/// Sell an nft
 		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
-		pub fn sell(_origin: OriginFor<T>, _token_id: u64, _price: u64) -> DispatchResult {
+		pub fn sell(_origin: OriginFor<T>, _token_id: u64, _price: BalanceOf<T>) -> DispatchResult {
 
 			// Check that the extrinsic was signed and get the signer.
 			let who = ensure_signed(_origin)?;
-
-			// Check tokenid validity
-			ensure!(TokenIdToOwner::<T>::contains_key(&_token_id), Error::<T>::InValidTokenId);
 			
 			// Get Owner of tokenid
-			let (token_owner, _) = TokenIdToOwner::<T>::get(&_token_id).expect("All tokenIds have a owner");
+			let (token_owner, _) = match TokenIdToOwner::<T>::get(&_token_id) {
+				Some(x) => x,
+				None => Err(<Error<T>>::InvalidTokenID)?
+			};
 
 			// Check if who is the owner of the token
 			ensure!(who == token_owner, Error::<T>::NotTokenOwner);
@@ -175,20 +148,14 @@ pub mod pallet {
 				sell_price: _price,
 			};
 
-			let number_of_sell_orders = match NumberOfSellOrders::<T>::get() {
-				None => {
-					NumberOfSellOrders::<T>::put(1);
-					0
-				},
-				Some(val) => {
-					let new_val = val.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					NumberOfSellOrders::<T>::put(new_val);
-					val
-				}
-			};
+			let number_of_sell_orders = NumberOfSellOrders::<T>::get().unwrap_or(0);
+			NumberOfSellOrders::<T>::put(
+				number_of_sell_orders.
+					checked_add(1).
+					ok_or(Error::<T>::StorageOverflow)?
+			);
 
 			SellOrders::<T>::insert(&number_of_sell_orders, &new_order);
-
 			IsTokenOnSale::<T>::insert(&_token_id, &number_of_sell_orders);
 
 			Self::deposit_event(Event::SellOrderCreated(_token_id, _price));
@@ -202,44 +169,97 @@ pub mod pallet {
 			// Check that the extrinsic was signed and get the signer.
 			let who = ensure_signed(_origin)?;
 
-			// Check tokenid validity
-			ensure!(TokenIdToOwner::<T>::contains_key(&_token_id), Error::<T>::InValidTokenId);
-			
 			// Get Owner of tokenid
-			let (token_owner, _) = TokenIdToOwner::<T>::get(&_token_id).expect("All tokenIds have a owner");
+			let (token_owner, _) = match TokenIdToOwner::<T>::get(&_token_id) {
+				Some(x) => x,
+				None => Err(<Error<T>>::InvalidTokenID)?
+			};
 
 			// Check if who is the owner of the token
 			ensure!(who == token_owner, Error::<T>::NotTokenOwner);
 
-			// Check if token is on sale 
-			ensure!(IsTokenOnSale::<T>::contains_key(&_token_id), Error::<T>::TokenNotOnSale);
-
 			// Get the index of the order in SellOrders
-			let index_in_sell_orders = IsTokenOnSale::<T>::get(&_token_id).expect("All tokens on sale have a index");
+			let index_in_sell_orders = match IsTokenOnSale::<T>::get(&_token_id) {
+				Some(id) => id,
+				None => Err(<Error<T>>::TokenNotOnSale)?
+			};
+
+			Self::destroy_sell_order(index_in_sell_orders)?;
+			Self::deposit_event(Event::CancelledOrder(_token_id));
+
+			Ok(())
+		}
+
+		#[pallet::weight(10_000)]
+		#[transactional]
+		pub fn buy(_origin: OriginFor<T>, _token_id: u64) -> DispatchResult {
+			let buyer = ensure_signed(_origin)?;
+
+			let sell_id = match Self::is_onsale(_token_id) {
+				Some(id) => id,
+				None => Err(<Error<T>>::TokenNotOnSale)?
+			};
+
+			let (seller, idx) = Self::get_nft_details(_token_id).unwrap();
+			let sell_price = Self::get_sell_order(sell_id).unwrap().sell_price;
+			
+			ensure!(T::Currency::free_balance(&buyer) >= sell_price, <Error<T>>::NotEnoughBalance);
+
+			// Transfer balance
+			T::Currency::transfer(&buyer, &seller, sell_price, ExistenceRequirement::KeepAlive)?;
+
+			// Delete order
+			Self::destroy_sell_order(sell_id)?;
+
+			// Remove seller as the owner
+			
+			let seller_nft_count = Self::get_number_of_nfts_owned(&seller).unwrap();
+
+			<OwnerToNumberOfNFTs<T>>::insert(
+				&seller,
+				seller_nft_count - 1
+			);
+
+			if idx != (seller_nft_count - 1) {
+				let last_nft_id = Self::get_token_ids_of_owned_nfts(&seller, seller_nft_count - 1).unwrap();
+				OwnerToTokenIds::<T>::insert(&seller, idx, last_nft_id);
+			}
+
+			OwnerToTokenIds::<T>::remove(&seller, seller_nft_count-1);
+
+			// Make buyer the owner
+			let buyer_nft_count = Self::get_number_of_nfts_owned(&buyer).unwrap_or(0);
+
+			TokenIdToOwner::<T>::insert(_token_id, (&buyer, &buyer_nft_count));
+
+			<OwnerToNumberOfNFTs<T>>::insert(
+				&buyer,
+				buyer_nft_count.checked_add(1).ok_or(Error::<T>::StorageOverflow)?
+			);
+
+			OwnerToTokenIds::<T>::insert(&buyer, &buyer_nft_count, &_token_id);
+
+			Self::deposit_event(Event::NFTSold(buyer, seller, sell_price));
+			Ok(())
+		}
+	}
+
+	impl<T: Config> Pallet<T> {
+		
+		fn destroy_sell_order(index_in_sell_orders: u128) -> Result<(), Error<T>> {
+
+			let token_id = SellOrders::<T>::get(index_in_sell_orders).unwrap().token_id;
 
 			// Get the index of the last order in SellOrders
-			let last_index_in_sell_orders = match NumberOfSellOrders::<T>::get() {
-				None => {
-					Err(Error::<T>::NoSellOrdersFound)?;
-					0
-				},
-				Some(val) => {
-					if val == 0 {
-						Err(Error::<T>::NoSellOrdersFound)?;
-						val
-					} else {
-						val - 1
-					}
-				},
-			}; 
-
+			let last_index_in_sell_orders = NumberOfSellOrders::<T>::get().unwrap() - 1;
 
 			if index_in_sell_orders != last_index_in_sell_orders {
-				// Check if SellOrders have a order in last index
-				ensure!(SellOrders::<T>::contains_key(&last_index_in_sell_orders), Error::<T>::SellOrderNotFound);
 
 				// Order at the last index
-				let order_at_last_index = SellOrders::<T>::get(&last_index_in_sell_orders).expect("All tokens on sale have an order");
+				let order_at_last_index = match SellOrders::<T>::get(&last_index_in_sell_orders) {
+					Some(order) => order,
+					None => Err(<Error<T>>::SellOrderNotFound)?
+				};
 
 				let token_id_of_last_order = order_at_last_index.token_id;
 				
@@ -250,13 +270,11 @@ pub mod pallet {
 			}
 
 			// Remove the token id from isTokenOnSale
-			IsTokenOnSale::<T>::remove(&_token_id);
+			IsTokenOnSale::<T>::remove(&token_id);
 
 			SellOrders::<T>::remove(&last_index_in_sell_orders);
 
 			NumberOfSellOrders::<T>::put(&last_index_in_sell_orders);
-
-			Self::deposit_event(Event::CancelledOrder(_token_id));
 
 			Ok(())
 		}
