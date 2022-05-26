@@ -102,7 +102,7 @@ pub mod pallet {
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		/// Mints a NFT
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
+		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(2,4))]
 		pub fn mint(_origin: OriginFor<T>) -> DispatchResult {
 			// Check that the extrinsic was signed and get the signer.
 			let owner = ensure_signed(_origin)?;
@@ -129,7 +129,7 @@ pub mod pallet {
 		}
 
 		/// Sell NFT
-		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
+		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(3,3))]
 		pub fn sell(_origin: OriginFor<T>, _token_id: TokenID, _price: BalanceOf<T>) -> DispatchResult {
 
 			// Check that the extrinsic was signed and get the signer.
@@ -167,7 +167,7 @@ pub mod pallet {
 		}
 
 		// Cancel a sell order
-		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
+		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(5,6))]
 		pub fn cancel_order(_origin: OriginFor<T>, _token_id: u64) -> DispatchResult {
 			// Check that the extrinsic was signed and get the signer.
 			let who = ensure_signed(_origin)?;
@@ -193,7 +193,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		#[pallet::weight(10_000)]
+		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(9,11))]
 		#[transactional]
 		pub fn buy(_origin: OriginFor<T>, _token_id: TokenID) -> DispatchResult {
 			let buyer = ensure_signed(_origin)?;
