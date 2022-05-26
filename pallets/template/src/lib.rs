@@ -23,6 +23,8 @@ pub mod pallet {
 	#[pallet::generate_store(pub(super) trait Store)]
 	pub struct Pallet<T>(_);
 
+	type TokenID = u64;
+
 	type BalanceOf<T> =
     	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -30,11 +32,9 @@ pub mod pallet {
 	#[scale_info(skip_type_params(T))]
 	#[codec(mel_bound())]
 	pub struct Order<T: Config> {
-		pub token_id: u64,
+		pub token_id: TokenID,
 		pub sell_price: BalanceOf<T>,
 	}
-
-	type TokenID = u64;
 
 	#[pallet::storage]
 	#[pallet::getter(fn get_next_token_id)]
@@ -108,11 +108,11 @@ pub mod pallet {
 			let owner = ensure_signed(_origin)?;
 
 			// Gets token_id and updates NextTokenId
-			let token_id: TokenID = <NextTokenId<T>>::get().unwrap_or(0);
+			let token_id: TokenID = Self::get_next_token_id().unwrap_or(0);
 			<NextTokenId<T>>::put(token_id.checked_add(1).ok_or(Error::<T>::StorageOverflow)?);
 
 			// Gets index of the current nfts for the owner
-			let number_of_nfts = <OwnerToNumberOfNFTs<T>>::get(&owner).unwrap_or(0);
+			let number_of_nfts = Self::get_number_of_nfts_owned(&owner).unwrap_or(0);
 			<OwnerToNumberOfNFTs<T>>::insert(
 				&owner,
 				number_of_nfts + 1
@@ -136,14 +136,12 @@ pub mod pallet {
 			let who = ensure_signed(_origin)?;
 			
 			// Get Owner of tokenid
-			let (token_owner, _) = match TokenIdToOwner::<T>::get(&_token_id) {
+			let (token_owner, _) = match Self::get_nft_details(&_token_id) {
 				Some(x) => x,
 				None => Err(<Error<T>>::InvalidTokenID)?
 			};
 
-			// Check if who is the owner of the token
 			ensure!(who == token_owner, Error::<T>::NotTokenOwner);
-
 			ensure!(!IsTokenOnSale::<T>::contains_key(&_token_id), Error::<T>::TokenAlreadyOnSale);
 
 			let new_order = Order {
@@ -151,7 +149,7 @@ pub mod pallet {
 				sell_price: _price,
 			};
 
-			let number_of_sell_orders = NumberOfSellOrders::<T>::get().unwrap_or(0);
+			let number_of_sell_orders = Self::get_number_of_sell_orders().unwrap_or(0);
 			NumberOfSellOrders::<T>::put(
 				number_of_sell_orders.
 					checked_add(1).
@@ -173,7 +171,7 @@ pub mod pallet {
 			let who = ensure_signed(_origin)?;
 
 			// Get Owner of tokenid
-			let (token_owner, _) = match TokenIdToOwner::<T>::get(&_token_id) {
+			let (token_owner, _) = match Self::get_nft_details(&_token_id) {
 				Some(x) => x,
 				None => Err(<Error<T>>::InvalidTokenID)?
 			};
@@ -182,7 +180,7 @@ pub mod pallet {
 			ensure!(who == token_owner, Error::<T>::NotTokenOwner);
 
 			// Get the index of the order in SellOrders
-			let index_in_sell_orders = match IsTokenOnSale::<T>::get(&_token_id) {
+			let index_in_sell_orders = match Self::is_onsale(&_token_id) {
 				Some(id) => id,
 				None => Err(<Error<T>>::TokenNotOnSale)?
 			};
@@ -248,15 +246,15 @@ pub mod pallet {
 		
 		fn destroy_sell_order(index_in_sell_orders: u128) -> Result<(), Error<T>> {
 
-			let token_id: TokenID = SellOrders::<T>::get(index_in_sell_orders).unwrap().token_id;
+			let token_id: TokenID = Self::get_sell_order(index_in_sell_orders).unwrap().token_id;
 
 			// Get the index of the last order in SellOrders
-			let last_index_in_sell_orders = NumberOfSellOrders::<T>::get().unwrap() - 1;
+			let last_index_in_sell_orders = Self::get_number_of_sell_orders().unwrap() - 1;
 
 			if index_in_sell_orders != last_index_in_sell_orders {
 
 				// Order at the last index
-				let order_at_last_index = match SellOrders::<T>::get(&last_index_in_sell_orders) {
+				let order_at_last_index = match Self::get_sell_order(&last_index_in_sell_orders) {
 					Some(order) => order,
 					None => Err(<Error<T>>::SellOrderNotFound)?
 				};
