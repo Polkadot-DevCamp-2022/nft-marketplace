@@ -34,13 +34,15 @@ pub mod pallet {
 		pub sell_price: BalanceOf<T>,
 	}
 
+	type TokenID = u64;
+
 	#[pallet::storage]
 	#[pallet::getter(fn get_next_token_id)]
-	pub type NextTokenId<T> = StorageValue<_, u64>;
+	pub type NextTokenId<T> = StorageValue<_, TokenID>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn get_nft_details)]
-	pub type TokenIdToOwner<T: Config> = StorageMap<_,Blake2_128Concat, u64, (T::AccountId, u64), OptionQuery>;
+	pub type TokenIdToOwner<T: Config> = StorageMap<_,Blake2_128Concat, TokenID, (T::AccountId, u64), OptionQuery>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn get_number_of_sell_orders)]
@@ -52,7 +54,7 @@ pub mod pallet {
 
 	#[pallet::storage]
 	#[pallet::getter(fn is_onsale)]
-	pub type IsTokenOnSale<T> = StorageMap<_, Blake2_128Concat, u64, u128, OptionQuery>;
+	pub type IsTokenOnSale<T> = StorageMap<_, Blake2_128Concat, TokenID, u128, OptionQuery>;
 
 	#[pallet::storage] 
 	#[pallet::getter(fn get_number_of_nfts_owned)] 
@@ -60,23 +62,24 @@ pub mod pallet {
 
 	#[pallet::storage]
 	#[pallet::getter(fn get_token_ids_of_owned_nfts)]
-	pub type OwnerToTokenIds<T: Config> = StorageDoubleMap<_, Blake2_128Concat, T::AccountId, Blake2_128Concat, u64, u64, OptionQuery>;
+	pub type OwnerToTokenIds<T: Config> = StorageDoubleMap<_, Blake2_128Concat, T::AccountId, Blake2_128Concat, u64, TokenID, OptionQuery>;
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
 		/// [TokenID, Minter] 
-		NFTMinted(u64, T::AccountId),
+		NFTMinted(TokenID, T::AccountId),
 		/// [TokenID, Price]
-		SellOrderCreated(u64, BalanceOf<T>),
+		SellOrderCreated(TokenID, BalanceOf<T>),
 		/// [TokenID]
-		CancelledOrder(u64),
+		CancelledOrder(TokenID),
 		/// [Buyer, Seller, Price]
 		NFTSold(T::AccountId, T::AccountId, BalanceOf<T>),
 	}
 
 	#[pallet::error]
 	pub enum Error<T> {
+		/// Number of items exceeded than supported
 		StorageOverflow,
 		/// Given tokenID is already minted
 		TokenIdAlreadyMinted,
@@ -98,14 +101,14 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// Mints an NFT
+		/// Mints a NFT
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
 		pub fn mint(_origin: OriginFor<T>) -> DispatchResult {
 			// Check that the extrinsic was signed and get the signer.
 			let owner = ensure_signed(_origin)?;
 
 			// Gets token_id and updates NextTokenId
-			let token_id = <NextTokenId<T>>::get().unwrap_or(0);
+			let token_id: TokenID = <NextTokenId<T>>::get().unwrap_or(0);
 			<NextTokenId<T>>::put(token_id.checked_add(1).ok_or(Error::<T>::StorageOverflow)?);
 
 			// Gets index of the current nfts for the owner
@@ -118,16 +121,16 @@ pub mod pallet {
 			// Adds record of tokenIds owner
 			TokenIdToOwner::<T>::insert(&token_id, (&owner, &number_of_nfts));
 
-			// Adds tokenid to owners list of owned tokenids
+			// Adds tokenId to owners list of owned tokenIds
 			OwnerToTokenIds::<T>::insert(&owner, &number_of_nfts, &token_id);
 
 			Self::deposit_event(Event::NFTMinted(token_id, owner));
 			Ok(())
 		}
 
-		/// Sell an nft
+		/// Sell NFT
 		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
-		pub fn sell(_origin: OriginFor<T>, _token_id: u64, _price: BalanceOf<T>) -> DispatchResult {
+		pub fn sell(_origin: OriginFor<T>, _token_id: TokenID, _price: BalanceOf<T>) -> DispatchResult {
 
 			// Check that the extrinsic was signed and get the signer.
 			let who = ensure_signed(_origin)?;
@@ -192,7 +195,7 @@ pub mod pallet {
 
 		#[pallet::weight(10_000)]
 		#[transactional]
-		pub fn buy(_origin: OriginFor<T>, _token_id: u64) -> DispatchResult {
+		pub fn buy(_origin: OriginFor<T>, _token_id: TokenID) -> DispatchResult {
 			let buyer = ensure_signed(_origin)?;
 
 			let sell_id = match Self::is_onsale(_token_id) {
@@ -203,16 +206,14 @@ pub mod pallet {
 			let (seller, idx) = Self::get_nft_details(_token_id).unwrap();
 			let sell_price = Self::get_sell_order(sell_id).unwrap().sell_price;
 			
-			ensure!(T::Currency::free_balance(&buyer) >= sell_price, <Error<T>>::NotEnoughBalance);
-
 			// Transfer balance
+			ensure!(T::Currency::free_balance(&buyer) >= sell_price, <Error<T>>::NotEnoughBalance);
 			T::Currency::transfer(&buyer, &seller, sell_price, ExistenceRequirement::KeepAlive)?;
 
-			// Delete order
+			// Delete sell order
 			Self::destroy_sell_order(sell_id)?;
 
-			// Remove seller as the owner
-			
+			// Remove seller as the owner of the NFT
 			let seller_nft_count = Self::get_number_of_nfts_owned(&seller).unwrap();
 
 			<OwnerToNumberOfNFTs<T>>::insert(
@@ -224,10 +225,9 @@ pub mod pallet {
 				let last_nft_id = Self::get_token_ids_of_owned_nfts(&seller, seller_nft_count - 1).unwrap();
 				OwnerToTokenIds::<T>::insert(&seller, idx, last_nft_id);
 			}
-
 			OwnerToTokenIds::<T>::remove(&seller, seller_nft_count-1);
 
-			// Make buyer the owner
+			// Make buyer the owner of the NFT
 			let buyer_nft_count = Self::get_number_of_nfts_owned(&buyer).unwrap_or(0);
 
 			TokenIdToOwner::<T>::insert(_token_id, (&buyer, &buyer_nft_count));
@@ -248,7 +248,7 @@ pub mod pallet {
 		
 		fn destroy_sell_order(index_in_sell_orders: u128) -> Result<(), Error<T>> {
 
-			let token_id = SellOrders::<T>::get(index_in_sell_orders).unwrap().token_id;
+			let token_id: TokenID = SellOrders::<T>::get(index_in_sell_orders).unwrap().token_id;
 
 			// Get the index of the last order in SellOrders
 			let last_index_in_sell_orders = NumberOfSellOrders::<T>::get().unwrap() - 1;
@@ -263,17 +263,14 @@ pub mod pallet {
 
 				let token_id_of_last_order = order_at_last_index.token_id;
 				
-				// Inser last order at index of deleted order
+				// Insert last order at index of deleted order
 				SellOrders::<T>::insert(&index_in_sell_orders, &order_at_last_index);
-
 				IsTokenOnSale::<T>::insert(&token_id_of_last_order, &index_in_sell_orders);
 			}
 
 			// Remove the token id from isTokenOnSale
 			IsTokenOnSale::<T>::remove(&token_id);
-
 			SellOrders::<T>::remove(&last_index_in_sell_orders);
-
 			NumberOfSellOrders::<T>::put(&last_index_in_sell_orders);
 
 			Ok(())
